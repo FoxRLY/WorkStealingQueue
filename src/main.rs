@@ -21,12 +21,12 @@ fn main(){
     queue.execute_queue();
 
     println!("Параллельная очередь");
-    let (mut queue, task_channel, stop_signal_channel) = WorkStealingQueueParallel::new(100, 5, 10, 100);
+    let (queue, task_channel, stop_signal_channel) = WorkStealingQueueParallel::new(100, 5, 10, 100);
     thread::scope(|s|{
 
         // Потоки добавления задач
         let task_channel_clone = task_channel.clone();
-        let t_1 = s.spawn(move||{
+        s.spawn(move||{
             for i in 0..100 {
                 let new_task = Task::new(i, |i|{
                     println!("{i}");
@@ -36,37 +36,30 @@ fn main(){
             }
         });
         let task_channel_clone = task_channel.clone();
-        let t_2 = s.spawn(move||{
-            for i in 0..100 {
+        s.spawn(move||{
+            for i in 100..200 {
                 let new_task = Task::new(i, |i|{
                     println!("{i}");
-                    thread::sleep(time::Duration::from_millis(i%5*100));
+                    thread::sleep(time::Duration::from_millis(i%5*10));
                 });
                 task_channel_clone.send(Box::new(new_task)).unwrap();
             }
         });
         let task_channel_clone = task_channel.clone();
-        let t_3 = s.spawn(move||{
-            for i in 0..100 {
+        s.spawn(move||{
+            for i in 200..300 {
                 let new_task = Task::new(i, |i|{
                     println!("{i}");
-                    thread::sleep(time::Duration::from_millis(i%5*100));
+                    thread::sleep(time::Duration::from_millis(i%5*1000));
                 });
                 task_channel_clone.send(Box::new(new_task)).unwrap();
             }
         });
-        
-
-
-        t_1.join().unwrap();
-        t_2.join().unwrap();
-        t_3.join().unwrap();
 
         // Исполняющий поток
         s.spawn(move||{
             queue.start();
         });
         stop_signal_channel.send(()).unwrap();
-
     });
 }
