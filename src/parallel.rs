@@ -253,7 +253,7 @@ impl WorkStealingQueueParallel{
     }
     
     /// Старт выполнения очереди
-    pub fn start(&mut self){
+    pub fn start(mut self){
         // Канал для задач
         let task_receiver = replace(&mut self.task_addition_channel, None).unwrap();
 
@@ -353,7 +353,6 @@ impl WorkStealingQueueParallel{
                             }
                             // Если смогли забронировать, то создаем новый процессор
                             if let Some(inner_index) = queue_index {
-                                // task_queues.retain(|x|{x.lock().unwrap().queue.deque_index != inner_index});
                                 let task_count = task_count_clone.clone();
                                 let worker_count = worker_count_clone.clone();
                                 let batch_size = self.batch_size;
