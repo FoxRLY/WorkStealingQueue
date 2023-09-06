@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, Scope};
-use std::sync::mpsc::{Sender, Receiver, channel, TryRecvError};
+use std::sync::mpsc::{Sender, Receiver, channel};
 use crate::Executable;
 
 
@@ -300,9 +300,6 @@ impl WorkStealingQueueParallel{
         // Канал для сигнала об окончании работы
         let end_signal_receiver = self.end_signal_channel.take().unwrap();
             
-        // Флаг окончания работы
-        let mut end_flag = false;
-
         // Число задач, которые сейчас выполняются
         let task_count = Arc::new(Mutex::new(0_usize));
             
@@ -315,27 +312,68 @@ impl WorkStealingQueueParallel{
             let new_task_queue = Arc::new(Mutex::new(TaskDequeLocking::new(i)  ));
             task_queues.push(new_task_queue);
         }
-
-        // Цикл создания задач
-        loop{
-            // Если получили сигнал о завершении, то выставляем флаг
-            match end_signal_receiver.try_recv(){
-                Ok(_) | Err(TryRecvError::Disconnected) => {end_flag = true;},
-                _ => {},
-            }
-
-            let new_tasks: Vec<_> = task_receiver.try_iter().collect();
-            // Если больше нет задач для вставки, нет выполняющихся задач и стоит флаг завершения -
-            // выходим
-            if new_tasks.is_empty(){
-                if end_flag && *task_count.lock().unwrap() == 0{
+        
+        let (combo_sender, combo_receiver) = channel::<Option<Box<dyn Executable>>>();
+        
+        let combo_sender_c = combo_sender.clone();
+        
+        // Поток получения задач
+        s.spawn(move ||{
+            // Получаем задачи из канала задач
+            for new_task in task_receiver.iter(){
+                // Если не удалось послать задачу, то значит, что работа окончена
+                if let Err(_) = combo_sender_c.send(Some(new_task)){
                     break;
                 }
             }
-            // Иначе добавляем полученные задачи в главную очередь
-            else{
+        });
+        
+        // Поток получения стоп-сигнала
+        s.spawn(move||{
+            end_signal_receiver.recv().unwrap();
+            let _ = combo_sender.send(None);
+        });
+
+        // Мне нужно сделать так, чтобы поток ожидал либо окончания работы, либо новой задачи
+        // Для этого я должен объединить два канала в один с помощью двух потоков
+
+        
+        let mut combo_receiver = Some(combo_receiver);
+        // Цикл создания задач
+        loop{
+            // Если канал ивентов существует 
+            if let Some(r) = &mut combo_receiver{
+                // Получаем новые ивенты
+                let mut new_events: Vec<_> = r.try_iter().collect();
+                // Если не получили новых ивентов
+                if new_events.is_empty(){
+                    // И в данный момент нет выполняемых заданий
+                    if *task_count.lock().unwrap() == 0{
+                        // Останавливаем поток, пока не придет новый ивент
+                        let new_event = r.recv().unwrap();
+                        new_events.push(new_event);
+                    }
+                }
+                // Получаем задания из канала
+                let mut new_tasks = vec![];
+                for event in new_events{
+                    //Если получили задачу - берем ее в массив
+                    if let Some(new_task) = event{
+                        new_tasks.push(new_task);
+                    }
+                    // Если получили стоп-сигнал - обрываем канал и больше не принимаем задач
+                    else{
+                        let _ = combo_receiver.take();
+                        break;
+                    }
+                }
+                // Добавляем задачи в очередь
                 *task_count.lock().unwrap() += new_tasks.len();
                 self.main_queue.lock().unwrap().queue.push_batch(new_tasks);
+            }
+            // Если канала не существует, значит уже пришел стоп-сигнал и мы выполнили все задачи
+            else{
+                break;
             }
                 
             // Логика создания процессоров
