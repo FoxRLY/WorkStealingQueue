@@ -217,8 +217,7 @@ impl TaskDequeLocking{
 /// задачи будут выполняться менее эффективно.
 pub struct WorkStealingQueueParallel{
     main_queue: Arc<Mutex<TaskDequeLocking>>,
-    task_addition_channel: Option<Receiver<Box<dyn Executable>>>,
-    end_signal_channel: Option<Receiver<()>>,
+    task_addition_channel: Option<Receiver<Option<Box<dyn Executable>>>>,
     max_worker_count: usize,
     threshold: usize,
     batch_size: usize,
@@ -229,22 +228,19 @@ impl WorkStealingQueueParallel{
     /// Новая параллельная очередь
     ///
     /// let (queue, task_channel, stop_signal_channel) = WorkStealingQueueParallel::new(...);
-    pub fn new(threshold: usize, max_worker_count: usize, min_retain_size: usize, batch_size: usize) -> (Self, Sender<Box<dyn Executable>>, Sender<()>) {
+    pub fn new(threshold: usize, max_worker_count: usize, min_retain_size: usize, batch_size: usize) -> (Self, Sender<Option<Box<dyn Executable>>>) {
         let main_queue = Arc::new(Mutex::new(TaskDequeLocking::new(0)));
         let (sender, receiver) = channel();
-        let (end_sender, end_receiver) = channel();
         (
             WorkStealingQueueParallel {
                 main_queue,
                 task_addition_channel: Some(receiver),
                 max_worker_count,
-                end_signal_channel: Some(end_receiver),
                 threshold, 
                 batch_size,
                 min_retain_size,
             },
             sender,
-            end_sender,
         )
     }
 
@@ -295,10 +291,7 @@ impl WorkStealingQueueParallel{
         s: &'a Scope<'a, '_>,
     ){
         // Канал для задач
-        let task_receiver = self.task_addition_channel.take().unwrap();
-
-        // Канал для сигнала об окончании работы
-        let end_signal_receiver = self.end_signal_channel.take().unwrap();
+        let mut task_receiver = self.task_addition_channel.take();
             
         // Число задач, которые сейчас выполняются
         let task_count = Arc::new(Mutex::new(0_usize));
@@ -312,42 +305,23 @@ impl WorkStealingQueueParallel{
             let new_task_queue = Arc::new(Mutex::new(TaskDequeLocking::new(i)  ));
             task_queues.push(new_task_queue);
         }
-        
-        let (combo_sender, combo_receiver) = channel::<Option<Box<dyn Executable>>>();
-        
-        let combo_sender_c = combo_sender.clone();
-        
-        // Поток получения задач
-        s.spawn(move ||{
-            // Получаем задачи из канала задач
-            for new_task in task_receiver.iter(){
-                // Если не удалось послать задачу, то значит, что работа окончена
-                if let Err(_) = combo_sender_c.send(Some(new_task)){
-                    break;
-                }
-            }
-        });
-        
-        // Поток получения стоп-сигнала
-        s.spawn(move||{
-            end_signal_receiver.recv().unwrap();
-            let _ = combo_sender.send(None);
-        });
 
-        // Мне нужно сделать так, чтобы поток ожидал либо окончания работы, либо новой задачи
-        // Для этого я должен объединить два канала в один с помощью двух потоков
-
-        
-        let mut combo_receiver = Some(combo_receiver);
         // Цикл создания задач
         loop{
             // Если канал ивентов существует 
-            if let Some(r) = &mut combo_receiver{
+            if let Some(r) = &mut task_receiver{
                 // Получаем новые ивенты
                 let mut new_events: Vec<_> = r.try_iter().collect();
                 // Если не получили новых ивентов - отправляем поток на ожидание
                 if new_events.is_empty(){
-                    let new_event = r.recv().unwrap();
+                    let new_event = r.recv();
+                    // Если во время ожидания канал был оборван, значит ивентов больше не будет
+                    let new_event = if let Ok(event) = new_event {
+                        event
+                    }
+                    else{
+                        break;
+                    };
                     new_events.push(new_event);
                 }
                 // Получаем задания из канала
@@ -359,7 +333,7 @@ impl WorkStealingQueueParallel{
                     }
                     // Если получили стоп-сигнал - обрываем канал и больше не принимаем задач
                     else{
-                        let _ = combo_receiver.take();
+                        let _ = task_receiver.take();
                         break;
                     }
                 }
@@ -454,7 +428,7 @@ mod tests{
     #[test]
     fn parallel_test(){
         let (sender, receiver) = std::sync::mpsc::channel();
-        let (queue, task_channel, stop_signal_channel) = WorkStealingQueueParallel::new(100, 5, 10, 100);
+        let (queue, task_channel) = WorkStealingQueueParallel::new(100, 5, 10, 100);
         let mut global = 0;
         // Имитация параллельной работы
         thread::scope(|s|{
@@ -466,7 +440,7 @@ mod tests{
                     let new_task = Task::new((), move |_|{
                         sender.send(1).unwrap(); 
                     });
-                    task_channel.send(Box::new(new_task)).unwrap();
+                    task_channel.send(Some(Box::new(new_task))).unwrap();
                 }
             });
             
@@ -478,9 +452,6 @@ mod tests{
             while let Ok(val) = receiver.recv(){
                 global += val;
             }
-            
-            // Сигнал остановки выполнения задач
-            stop_signal_channel.send(()).unwrap();
         });
         assert_eq!(global, 300);
     }

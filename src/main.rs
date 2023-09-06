@@ -65,33 +65,27 @@ fn main(){
     // });
 
         let global = Arc::new(Mutex::new(0));
-        let (queue, task_channel, stop_signal_channel) = WorkStealingQueueParallel::new(100, 5, 10, 100);
+        let (queue, task_channel) = WorkStealingQueueParallel::new(100, 5, 10, 100);
         
         // Имитация параллельной работы
         thread::scope(|s|{
             
             // Поток добавления задач
             let global = global.clone();
-            let b = s.spawn(move||{
+            s.spawn(move||{
                 for _ in 0..300{
                     let global = global.clone();
                     let new_task = Task::new((), move |_|{
                         *global.lock().unwrap() += 1; 
                     });
-                    task_channel.send(Box::new(new_task)).unwrap();
+                    task_channel.send(Some(Box::new(new_task))).unwrap();
                 }
             });
             
             // Поток выполнения задач
-            let a = s.spawn(move||{
+            s.spawn(move||{
                 queue.start();
             });
-            
-            b.join().unwrap();
-            // Сигнал остановки выполнения задач
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            stop_signal_channel.send(()).unwrap();
-            a.join().unwrap()    
         });
         println!("{}", *global.lock().unwrap());
 }
