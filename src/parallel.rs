@@ -163,14 +163,11 @@ impl WorkStealingQueueSynced{
                         // Иначе проходимся по очередям в поисках задач
                         else{
                             let work_status = workers.iter().any(|worker|{
-                                // На время трансферта задач следует заблокировать свою очередь,
-                                // иначе другие процессоры могут преждевременно выйти, не увидев задачи,
-                                // которые были украдены, но не добавлены в очередь вора
-                                let mut inner_guard = inner_queue.lock().unwrap();
                                 let mut worker_guard = worker.lock().unwrap();
                                 let task_steal_result = worker_guard.try_steal(min_steal_size, batch_size);
                                 let victim_index = worker_guard.deque_index;
                                 if let Ok(tasks) = task_steal_result{
+                                    let mut inner_guard = inner_queue.lock().unwrap();
                                     println!("Queue {deque_index}: stolen {} tasks from queue {victim_index}", tasks.len());
                                     inner_guard.push_batch(tasks);
                                     true
@@ -323,6 +320,7 @@ impl WorkStealingQueueParallel{
                 }
             }
         }
+        task_queues[inner_index].lock().unwrap().is_locked = false;
         *worker_count.lock().unwrap() -= 1;
     }
 
@@ -452,7 +450,6 @@ mod tests{
         for _ in 0..300{
             let gc_clone = global_counter.clone();
             let new_task = Task::new((), move |_|{
-                std::thread::sleep(std::time::Duration::from_millis(5));
                 *gc_clone.lock().unwrap() += 1;
             });
             queue.add_task(Box::new(new_task));
@@ -474,7 +471,6 @@ mod tests{
                 for _ in 0..300{
                     let sender = sender.clone();
                     let new_task = Task::new((), move |_|{
-                        // std::thread::sleep(std::time::Duration::from_millis(50));
                         sender.send(1).unwrap(); 
                     });
                     task_channel.send(Box::new(new_task)).unwrap();
