@@ -323,8 +323,8 @@ impl WorkStealingQueueParallel{
         *worker_count.lock().unwrap() -= 1;
     }
 
-    fn scheduler_thread_func<'a, 'b>(
-        s: &'a Scope<'a, 'b>,
+    fn scheduler_thread_func<'a>(
+        s: &'a Scope<'a, '_>,
         task_queues: Vec<Arc<Mutex<TaskDequeLocking>>>,
         worker_count: Arc<Mutex<usize>>,
         task_count: Arc<Mutex<usize>>,
@@ -378,10 +378,11 @@ impl WorkStealingQueueParallel{
     /// Старт выполнения очереди
     pub fn start(mut self){
         // Канал для задач
-        let task_receiver = replace(&mut self.task_addition_channel, None).unwrap();
+        let task_receiver = self.task_addition_channel.take().unwrap();
+        // let task_receiver = replace(&mut self.task_addition_channel, None).unwrap();
 
         // Канал для сигнала об окончании работы
-        let end_signal_receiver = replace(&mut self.end_signal_channel, None).unwrap();
+        let end_signal_receiver = self.end_signal_channel.take().unwrap();
 
         // Флаг остановки работы
         let is_end_signal_received = Arc::new(Mutex::new(false));
@@ -399,7 +400,7 @@ impl WorkStealingQueueParallel{
             
             
             let main_queue = self.main_queue.clone();
-            let task_count = Arc::new(Mutex::new(0 as usize));
+            let task_count = Arc::new(Mutex::new(0_usize));
             let task_count_clone = task_count.clone();
             // Поток получения задач
             s.spawn(move||{
