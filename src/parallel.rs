@@ -371,9 +371,6 @@ impl WorkStealingQueueParallel{
                     }
                 }
                         
-                let task_queues = task_queues.clone();
-                let worker_count = worker_count.clone();
-                let task_count = task_count.clone();
                 if let Some(inner_index) = queue_index {
                     s.spawn(move||{
                         Self::processor_thread_func(
