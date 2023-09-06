@@ -1,8 +1,7 @@
 use std::collections::VecDeque;
-use std::mem::replace;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, Scope};
-use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::mpsc::{Sender, Receiver, channel, TryRecvError};
 use crate::Executable;
 
 
@@ -248,38 +247,6 @@ impl WorkStealingQueueParallel{
             end_sender,
         )
     }
-    
-    fn stop_signal_thread_func(end_signal_receiver:Receiver<()>, flag: Arc<Mutex<bool>>){
-        // Ждем любого сигнала с канала и выставляем флаг окончания работы
-        let _ = end_signal_receiver.recv();
-        println!("Завершаю выполнение очереди");
-        *flag.lock().unwrap() = true;
-    } 
-    
-    fn task_receiving_thread_func(
-        task_receiver: Receiver<Box<dyn Executable>>,
-        main_queue: Arc<Mutex<TaskDequeLocking>>,
-        task_count: Arc<Mutex<usize>>,
-        flag_1: Arc<Mutex<bool>>,
-        flag_2: Arc<Mutex<bool>>,
-    ){
-        loop{
-             // Получаем задачи из канала
-            let new_tasks: Vec<_> = task_receiver.try_iter().collect();
-            if *flag_1.lock().unwrap() && new_tasks.is_empty(){
-                println!("Очередь больше не получит новых заданий");
-                *flag_2.lock().unwrap() = true;
-                break;
-            }
-            // Иначе лочим главную очередь и счетчик задач
-            let mut main_queue = main_queue.lock().unwrap();
-            let mut task_count = task_count.lock().unwrap();
-
-            // И добавляем задачи в очередь, обновляя счетчик
-            *task_count += new_tasks.len();
-            main_queue.queue.push_batch(new_tasks);
-        }
-    }
 
     fn processor_thread_func(
         task_queues: Vec<Arc<Mutex<TaskDequeLocking>>>,
@@ -323,111 +290,106 @@ impl WorkStealingQueueParallel{
         *worker_count.lock().unwrap() -= 1;
     }
 
-    fn scheduler_thread_func<'a>(
+    fn main_thread_func<'a>(
+        mut self,
         s: &'a Scope<'a, '_>,
-        task_queues: Vec<Arc<Mutex<TaskDequeLocking>>>,
-        worker_count: Arc<Mutex<usize>>,
-        task_count: Arc<Mutex<usize>>,
-        min_retain_size: usize,
-        batch_size: usize,
-        max_worker_count: usize,
-        threshold: usize,
-        flag_2: Arc<Mutex<bool>>
     ){
-        // Цикл создания процессоров
-        loop{
-            // Если очередь больше не получит новых задач и кол-во задач равно нулю -
-            // выходим
-            if *flag_2.lock().unwrap() && *task_count.lock().unwrap() == 0 {
-                println!("Очередь отработала все задачи");
-                break;
-            }
-                    
-            // Иначе проверяем, можем ли мы создать еще одного работника
-            if *worker_count.lock().unwrap() < max_worker_count{
-                // И нужен ли он в принципе
-                if div_ceil(*task_count.lock().unwrap(), threshold) > *worker_count.lock().unwrap() {
-                    // Если да, то начинаем поиск свободной очереди
-                    let task_queues = task_queues.clone();
-                    let mut queue_index: Option<usize> = None;
-
-                    // Пытаемся забронировать ее для нового процессора
-                    for task_queue in task_queues.iter().enumerate(){
-                        let (index, queue) = task_queue;
-                        let mut queue = queue.lock().unwrap();
-                        if !queue.is_locked{
-                            queue.is_locked = true;
-                            queue_index = Some(index);
-                            break;
-                        }
-                    }
-                    // Если смогли забронировать, то создаем новый процессор
-                    if let Some(inner_index) = queue_index {
-                        let task_count = task_count.clone();
-                        let worker_count = worker_count.clone();
-                        // Новый процессор
-                        s.spawn(move ||{
-                            Self::processor_thread_func(task_queues, worker_count, inner_index, task_count, min_retain_size, batch_size)
-                        });
-                    }
-                } 
-            }
-        } 
-    }
-
-    /// Старт выполнения очереди
-    pub fn start(mut self){
         // Канал для задач
         let task_receiver = self.task_addition_channel.take().unwrap();
-        // let task_receiver = replace(&mut self.task_addition_channel, None).unwrap();
 
         // Канал для сигнала об окончании работы
         let end_signal_receiver = self.end_signal_channel.take().unwrap();
-
-        // Флаг остановки работы
-        let is_end_signal_received = Arc::new(Mutex::new(false));
-        let is_end_signal_received_clone = is_end_signal_received.clone();
-
-        // Флаг окончания добавления новых задач
-        let is_queue_loading_stopped = Arc::new(Mutex::new(false));
-        let is_queue_loading_stopped_clone = is_queue_loading_stopped.clone();
-
-        thread::scope(|s|{
-            // Поток для отслеживания стоп-сигнала
-            s.spawn(move||{
-                Self::stop_signal_thread_func(end_signal_receiver, is_end_signal_received_clone);
-            });
             
-            
-            let main_queue = self.main_queue.clone();
-            let task_count = Arc::new(Mutex::new(0_usize));
-            let task_count_clone = task_count.clone();
-            // Поток получения задач
-            s.spawn(move||{
-                Self::task_receiving_thread_func(
-                    task_receiver, main_queue,
-                    task_count_clone, is_end_signal_received,
-                    is_queue_loading_stopped_clone
-                );
-            });
+        // Флаг окончания работы
+        let mut end_flag = false;
 
-            // Создаем очереди для процессоров
-            let mut task_queues = vec![self.main_queue.clone()];
-            for i in 1..self.max_worker_count{
-                let new_task_queue = Arc::new(Mutex::new(TaskDequeLocking::new(i)  ));
-                task_queues.push(new_task_queue);
+        // Число задач, которые сейчас выполняются
+        let task_count = Arc::new(Mutex::new(0_usize));
+            
+        // Число процессоров, которые сейчас работают
+        let worker_count = Arc::new(Mutex::new(0_usize));
+
+        // Создаем очереди для процессоров
+        let mut task_queues = vec![self.main_queue.clone()];
+        for i in 1..self.max_worker_count{
+            let new_task_queue = Arc::new(Mutex::new(TaskDequeLocking::new(i)  ));
+            task_queues.push(new_task_queue);
+        }
+
+        // Цикл создания задач
+        loop{
+            // Если получили сигнал о завершении, то выставляем флаг
+            match end_signal_receiver.try_recv(){
+                Ok(_) | Err(TryRecvError::Disconnected) => {end_flag = true;},
+                _ => {},
             }
-            
 
-            let worker_count = Arc::new(Mutex::new(0));
-            s.spawn(move||{
-                Self::scheduler_thread_func(
-                    s, task_queues, worker_count,
-                    task_count, self.min_retain_size,
-                    self.batch_size, self.max_worker_count,
-                    self.threshold, is_queue_loading_stopped
-                );
-            });
+            let new_tasks: Vec<_> = task_receiver.try_iter().collect();
+            // Если больше нет задач для вставки, нет выполняющихся задач и стоит флаг завершения -
+            // выходим
+            if new_tasks.is_empty(){
+                if end_flag && *task_count.lock().unwrap() == 0{
+                    break;
+                }
+            }
+            // Иначе добавляем полученные задачи в главную очередь
+            else{
+                *task_count.lock().unwrap() += new_tasks.len();
+                self.main_queue.lock().unwrap().queue.push_batch(new_tasks);
+            }
+                
+            // Логика создания процессоров
+            Self::processor_creation_func(s, task_queues.clone(), worker_count.clone(), self.max_worker_count, task_count.clone(), self.threshold, self.min_retain_size, self.batch_size)
+        }
+    }
+    
+    fn processor_creation_func<'a>(
+        s: &'a Scope<'a, '_>,
+        task_queues: Vec<Arc<Mutex<TaskDequeLocking>>>,
+        worker_count: Arc<Mutex<usize>>,
+        max_worker_count: usize,
+        task_count: Arc<Mutex<usize>>,
+        threshold: usize,
+        min_retain_size: usize,
+        batch_size: usize
+    ){
+        // Проверяем, можем ли мы создать еще процессоров
+        if *worker_count.lock().unwrap() < max_worker_count{
+            // И нужны ли они в принципе
+            if div_ceil(*task_count.lock().unwrap(), threshold) > *worker_count.lock().unwrap() {
+                // Если да, то начинаем поиск свободной очереди
+                let mut queue_index: Option<usize> = None;
+
+                // Пытаемся забронировать свободную очередь для нового процессора
+                for task_queue in task_queues.iter().enumerate(){
+                    let (index, queue) = task_queue;
+                    let mut queue = queue.lock().unwrap();
+                    if !queue.is_locked {
+                        queue.is_locked = true;
+                        queue_index = Some(index);
+                        break;
+                    }
+                }
+                        
+                let task_queues = task_queues.clone();
+                let worker_count = worker_count.clone();
+                let task_count = task_count.clone();
+                if let Some(inner_index) = queue_index {
+                    s.spawn(move||{
+                        Self::processor_thread_func(
+                            task_queues, worker_count,
+                            inner_index, task_count,
+                            min_retain_size, batch_size);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Старт выполнения очереди
+    pub fn start(self){
+        thread::scope(|s|{
+            Self::main_thread_func(self, s);
         });
     }
 }
