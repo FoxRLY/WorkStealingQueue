@@ -266,7 +266,6 @@ impl WorkStealingQueueParallel{
         loop{
              // Получаем задачи из канала
             let new_tasks: Vec<_> = task_receiver.try_iter().collect();
-            std::thread::sleep(std::time::Duration::from_millis(10));
             if *flag_1.lock().unwrap() && new_tasks.is_empty(){
                 println!("Очередь больше не получит новых заданий");
                 *flag_2.lock().unwrap() = true;
@@ -335,10 +334,6 @@ impl WorkStealingQueueParallel{
         threshold: usize,
         flag_2: Arc<Mutex<bool>>
     ){
-        // Необходимые счетчики
-        let worker_count = worker_count.clone();
-        let task_count = task_count.clone();
-
         // Цикл создания процессоров
         loop{
             // Если очередь больше не получит новых задач и кол-во задач равно нулю -
