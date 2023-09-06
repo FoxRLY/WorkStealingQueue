@@ -345,14 +345,10 @@ impl WorkStealingQueueParallel{
             if let Some(r) = &mut combo_receiver{
                 // Получаем новые ивенты
                 let mut new_events: Vec<_> = r.try_iter().collect();
-                // Если не получили новых ивентов
+                // Если не получили новых ивентов - отправляем поток на ожидание
                 if new_events.is_empty(){
-                    // И в данный момент нет выполняемых заданий
-                    if *task_count.lock().unwrap() == 0{
-                        // Останавливаем поток, пока не придет новый ивент
-                        let new_event = r.recv().unwrap();
-                        new_events.push(new_event);
-                    }
+                    let new_event = r.recv().unwrap();
+                    new_events.push(new_event);
                 }
                 // Получаем задания из канала
                 let mut new_tasks = vec![];
@@ -377,7 +373,9 @@ impl WorkStealingQueueParallel{
             }
                 
             // Логика создания процессоров
-            Self::processor_creation_func(s, task_queues.clone(), worker_count.clone(), self.max_worker_count, task_count.clone(), self.threshold, self.min_retain_size, self.batch_size)
+            // Создаем новые процессоры, пока можем
+            while let Ok(_) = Self::processor_creation_func(s, task_queues.clone(), worker_count.clone(), self.max_worker_count, task_count.clone(), self.threshold, self.min_retain_size, self.batch_size){
+            }
         }
     }
     
@@ -390,7 +388,7 @@ impl WorkStealingQueueParallel{
         threshold: usize,
         min_retain_size: usize,
         batch_size: usize
-    ){
+    ) -> Result<(), ()>{
         // Проверяем, можем ли мы создать еще процессоров
         if *worker_count.lock().unwrap() < max_worker_count{
             // И нужны ли они в принципе
@@ -416,9 +414,11 @@ impl WorkStealingQueueParallel{
                             inner_index, task_count,
                             min_retain_size, batch_size);
                     });
+                    return Ok(());
                 }
             }
         }
+        Err(())
     }
 
     /// Старт выполнения очереди
@@ -455,7 +455,7 @@ mod tests{
     fn parallel_test(){
         let (sender, receiver) = std::sync::mpsc::channel();
         let (queue, task_channel, stop_signal_channel) = WorkStealingQueueParallel::new(100, 5, 10, 100);
-        
+        let mut global = 0;
         // Имитация параллельной работы
         thread::scope(|s|{
             
@@ -475,14 +475,13 @@ mod tests{
                 queue.start();
             });
             
-            let mut global = 0;
             while let Ok(val) = receiver.recv(){
                 global += val;
             }
-            assert_eq!(global, 300);
             
             // Сигнал остановки выполнения задач
             stop_signal_channel.send(()).unwrap();
         });
+        assert_eq!(global, 300);
     }
 }
