@@ -1,32 +1,30 @@
 pub mod parallel;
 
-
-pub trait Executable: Send{
+pub trait Executable: Send {
     fn execute(self: Box<Self>);
 }
 
-pub struct Task<T, F> where
-    T: Send,
-    F: FnOnce(T) + Send
+pub struct Task<T>
+where
+    T: FnOnce() + Send,
 {
-    data: T,
-    procedure: F,
+    procedure: T,
 }
 
-impl<T, F> Task<T, F> where
-    T: Send,
-    F: FnOnce(T) + Send
+impl<T> Task<T>
+where
+    T: FnOnce() + Send,
 {
-    pub fn new(data: T, procedure: F) -> Task<T, F>{
-        Task { data, procedure }
+    pub fn new(procedure: T) -> Task<T> {
+        Task { procedure }
     }
 }
 
-impl<T, F> Executable for Task<T, F> where
-    T: Send,
-    F: FnOnce(T) + Send
+impl<T> Executable for Task<T>
+where
+    T: FnOnce() + Send,
 {
     fn execute(self: Box<Self>) {
-        (self.procedure)(self.data);
+        (self.procedure)();
     }
 }
